@@ -1,4 +1,4 @@
-name: Control Cuentas Streaming APK firmado
+name: Control Cuentas Streaming APK + AAB firmado
 
 on:
   workflow_dispatch:
@@ -19,21 +19,17 @@ jobs:
             echo "ERROR: No hay ningún archivo ZIP en el repositorio."
             exit 1
           fi
-          echo "ZIP encontrado: $ZIP_FILE"
+          rm -rf proyecto
           mkdir -p proyecto
           unzip -o "$ZIP_FILE" -d proyecto
-
-      - name: Detectar carpeta del proyecto Android
-        shell: bash
-        run: |
           SETTINGS_FILE="$(find proyecto -type f \( -name 'settings.gradle.kts' -o -name 'settings.gradle' \) | head -n 1)"
           if [ -z "$SETTINGS_FILE" ]; then
-            echo "ERROR: No se encontró settings.gradle.kts ni settings.gradle."
+            echo "ERROR: No se encontró el proyecto Android."
             exit 1
           fi
           PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
-          echo "Proyecto Android encontrado en: $PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Proyecto: $PROJECT_DIR"
 
       - name: Configurar Java 17
         uses: actions/setup-java@v4
@@ -41,7 +37,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Verificar Android SDK
+      - name: Instalar Android SDK 36
         shell: bash
         run: |
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
@@ -53,69 +49,52 @@ jobs:
             exit 1
           fi
           yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
       - name: Configurar Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.10.2"
+          gradle-version: "8.11.1"
 
       - name: Reconstruir clave privada
         shell: bash
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
-          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
-            echo "ERROR: Falta el secret ANDROID_KEYSTORE_BASE64"
-            exit 1
-          fi
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/nexo-release.jks"
-          chmod 600 "$RUNNER_TEMP/nexo-release.jks"
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/nexo-release.jks"
+          test -s "$RUNNER_TEMP/nexo-release.jks" || { echo "ERROR: keystore vacío"; exit 1; }
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/nexo-release.jks" >> "$GITHUB_ENV"
 
-      - name: Compilar APK release
-        shell: bash
-        run: |
-          cd "$PROJECT_DIR"
-          gradle :app:assembleRelease --stacktrace
-
-      - name: Localizar APK release
-        shell: bash
-        run: |
-          APK_FILE="$(find "$PROJECT_DIR/app/build/outputs/apk/release" -type f -name '*.apk' | head -n 1)"
-          if [ -z "$APK_FILE" ]; then
-            echo "ERROR: No se encontró APK release."
-            exit 1
-          fi
-          echo "APK sin firmar: $APK_FILE"
-          echo "UNSIGNED_APK=$APK_FILE" >> "$GITHUB_ENV"
-
-      - name: Alinear y firmar APK
+      - name: Compilar APK y AAB release
         shell: bash
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
-          ZIPALIGN="$BUILD_TOOLS/zipalign"
-          APKSIGNER="$BUILD_TOOLS/apksigner"
+          cd "$PROJECT_DIR"
+          gradle :app:assembleRelease :app:bundleRelease --stacktrace
 
-          "$ZIPALIGN" -f -p 4 "$UNSIGNED_APK" "$RUNNER_TEMP/ControlCuentasStreaming-aligned.apk"
-
-          "$APKSIGNER" sign \
-            --ks "$RUNNER_TEMP/nexo-release.jks" \
-            --ks-key-alias "$KEY_ALIAS" \
-            --ks-pass "pass:$KEYSTORE_PASSWORD" \
-            --key-pass "pass:$KEY_PASSWORD" \
-            --out "$RUNNER_TEMP/ControlCuentasStreaming-signed.apk" \
-            "$RUNNER_TEMP/ControlCuentasStreaming-aligned.apk"
-
-          "$APKSIGNER" verify --verbose --print-certs "$RUNNER_TEMP/ControlCuentasStreaming-signed.apk"
-          echo "SIGNED_APK=$RUNNER_TEMP/ControlCuentasStreaming-signed.apk" >> "$GITHUB_ENV"
+      - name: Localizar artefactos
+        shell: bash
+        run: |
+          APK_FILE="$(find "$PROJECT_DIR/app/build/outputs/apk/release" -type f -name '*.apk' | head -n 1)"
+          AAB_FILE="$(find "$PROJECT_DIR/app/build/outputs/bundle/release" -type f -name '*.aab' | head -n 1)"
+          test -n "$APK_FILE" || { echo "ERROR: no se encontró APK"; exit 1; }
+          test -n "$AAB_FILE" || { echo "ERROR: no se encontró AAB"; exit 1; }
+          echo "APK_FILE=$APK_FILE" >> "$GITHUB_ENV"
+          echo "AAB_FILE=$AAB_FILE" >> "$GITHUB_ENV"
+          echo "APK: $APK_FILE"
+          echo "AAB: $AAB_FILE"
 
       - name: Subir APK firmado
         uses: actions/upload-artifact@v4
         with:
-          name: ControlCuentasStreaming-firmado
-          path: ${{ env.SIGNED_APK }}
+          name: ControlStreaming-v6.4-APK
+          path: ${{ env.APK_FILE }}
+          if-no-files-found: error
+
+      - name: Subir AAB para Google Play
+        uses: actions/upload-artifact@v4
+        with:
+          name: ControlStreaming-v6.4-GooglePlay-AAB
+          path: ${{ env.AAB_FILE }}
           if-no-files-found: error
