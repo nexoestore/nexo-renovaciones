@@ -1,12 +1,14 @@
-name: Control Cuentas Streaming APK + AAB firmado
+name: Control Cuentas Streaming v7.4 - Calidad comercial
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Descargar repositorio
         uses: actions/checkout@v4
@@ -41,13 +43,8 @@ jobs:
         shell: bash
         run: |
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          if [ ! -f "$SDKMANAGER" ]; then
-            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n 1)"
-          fi
-          if [ -z "$SDKMANAGER" ] || [ ! -f "$SDKMANAGER" ]; then
-            echo "ERROR: No se encontró sdkmanager."
-            exit 1
-          fi
+          if [ ! -f "$SDKMANAGER" ]; then SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n 1)"; fi
+          test -f "$SDKMANAGER" || { echo "ERROR: No se encontró sdkmanager"; exit 1; }
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
@@ -56,14 +53,29 @@ jobs:
         with:
           gradle-version: "8.11.1"
 
+      - name: Validar secretos de firma
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE_B64" || { echo "Falta ANDROID_KEYSTORE_BASE64"; exit 1; }
+          test -n "$STORE_PASS" || { echo "Falta KEYSTORE_PASSWORD"; exit 1; }
+          test -n "$ALIAS" || { echo "Falta KEY_ALIAS"; exit 1; }
+          test -n "$KEY_PASS" || { echo "Falta KEY_PASSWORD"; exit 1; }
+
       - name: Reconstruir clave privada
         shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/nexo-release.jks"
+          echo "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/nexo-release.jks"
           test -s "$RUNNER_TEMP/nexo-release.jks" || { echo "ERROR: keystore vacío"; exit 1; }
           echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/nexo-release.jks" >> "$GITHUB_ENV"
 
-      - name: Compilar APK y AAB release
+      - name: Tests, Lint y compilación release
         shell: bash
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -71,30 +83,50 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           cd "$PROJECT_DIR"
-          gradle :app:assembleRelease :app:bundleRelease --stacktrace
+          gradle :app:testReleaseUnitTest :app:lintRelease :app:assembleRelease :app:bundleRelease --stacktrace
 
-      - name: Localizar artefactos
+      - name: Localizar y verificar artefactos
         shell: bash
         run: |
           APK_FILE="$(find "$PROJECT_DIR/app/build/outputs/apk/release" -type f -name '*.apk' | head -n 1)"
           AAB_FILE="$(find "$PROJECT_DIR/app/build/outputs/bundle/release" -type f -name '*.aab' | head -n 1)"
-          test -n "$APK_FILE" || { echo "ERROR: no se encontró APK"; exit 1; }
-          test -n "$AAB_FILE" || { echo "ERROR: no se encontró AAB"; exit 1; }
+          test -f "$APK_FILE" || { echo "ERROR: no se encontró APK"; exit 1; }
+          test -f "$AAB_FILE" || { echo "ERROR: no se encontró AAB"; exit 1; }
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$APK_FILE"
+          jarsigner -verify "$AAB_FILE"
+          sha256sum "$APK_FILE" "$AAB_FILE" | tee "$RUNNER_TEMP/release-sha256.txt"
           echo "APK_FILE=$APK_FILE" >> "$GITHUB_ENV"
           echo "AAB_FILE=$AAB_FILE" >> "$GITHUB_ENV"
-          echo "APK: $APK_FILE"
-          echo "AAB: $AAB_FILE"
+          echo "CHECKSUM_FILE=$RUNNER_TEMP/release-sha256.txt" >> "$GITHUB_ENV"
+
+      - name: Localizar Lint
+        shell: bash
+        run: |
+          LINT_HTML="$(find "$PROJECT_DIR/app/build/reports" -type f -name 'lint-results-release.html' | head -n 1)"
+          LINT_XML="$(find "$PROJECT_DIR/app/build/reports" -type f -name 'lint-results-release.xml' | head -n 1)"
+          echo "LINT_HTML=$LINT_HTML" >> "$GITHUB_ENV"
+          echo "LINT_XML=$LINT_XML" >> "$GITHUB_ENV"
 
       - name: Subir APK firmado
         uses: actions/upload-artifact@v4
         with:
-          name: ControlStreaming-v6.4-APK
+          name: ControlStreaming-v7.4-APK
           path: ${{ env.APK_FILE }}
           if-no-files-found: error
 
       - name: Subir AAB para Google Play
         uses: actions/upload-artifact@v4
         with:
-          name: ControlStreaming-v6.4-GooglePlay-AAB
+          name: ControlStreaming-v7.4-GooglePlay-AAB
           path: ${{ env.AAB_FILE }}
           if-no-files-found: error
+
+      - name: Subir controles de calidad
+        uses: actions/upload-artifact@v4
+        with:
+          name: ControlStreaming-v7.4-Calidad
+          path: |
+            ${{ env.LINT_HTML }}
+            ${{ env.LINT_XML }}
+            ${{ env.CHECKSUM_FILE }}
+          if-no-files-found: warn
