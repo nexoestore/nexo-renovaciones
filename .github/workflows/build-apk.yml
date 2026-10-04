@@ -1,4 +1,4 @@
-name: Control Cuentas Streaming v7.4 - Calidad comercial
+name: Control Cuentas Streaming v7.4.1 - Diagnostico claro
 
 on:
   workflow_dispatch:
@@ -9,6 +9,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Descargar repositorio
         uses: actions/checkout@v4
@@ -43,7 +44,9 @@ jobs:
         shell: bash
         run: |
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          if [ ! -f "$SDKMANAGER" ]; then SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n 1)"; fi
+          if [ ! -f "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n 1)"
+          fi
           test -f "$SDKMANAGER" || { echo "ERROR: No se encontró sdkmanager"; exit 1; }
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
@@ -53,7 +56,7 @@ jobs:
         with:
           gradle-version: "8.11.1"
 
-      - name: Validar secretos de firma
+      - name: Validar firma
         shell: bash
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -65,17 +68,11 @@ jobs:
           test -n "$STORE_PASS" || { echo "Falta KEYSTORE_PASSWORD"; exit 1; }
           test -n "$ALIAS" || { echo "Falta KEY_ALIAS"; exit 1; }
           test -n "$KEY_PASS" || { echo "Falta KEY_PASSWORD"; exit 1; }
-
-      - name: Reconstruir clave privada
-        shell: bash
-        env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-        run: |
           echo "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/nexo-release.jks"
           test -s "$RUNNER_TEMP/nexo-release.jks" || { echo "ERROR: keystore vacío"; exit 1; }
           echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/nexo-release.jks" >> "$GITHUB_ENV"
 
-      - name: Tests, Lint y compilación release
+      - name: 1 - Pruebas automaticas
         shell: bash
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -83,9 +80,57 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           cd "$PROJECT_DIR"
-          gradle :app:testReleaseUnitTest :app:lintRelease :app:assembleRelease :app:bundleRelease --stacktrace
+          gradle :app:testReleaseUnitTest --stacktrace
 
-      - name: Localizar y verificar artefactos
+      - name: Guardar reporte de pruebas
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Diagnostico-Pruebas-v7.4.1
+          path: |
+            ${{ env.PROJECT_DIR }}/app/build/reports/tests/testReleaseUnitTest/**
+            ${{ env.PROJECT_DIR }}/app/build/test-results/testReleaseUnitTest/**
+          if-no-files-found: warn
+
+      - name: 2 - Revisar Lint
+        shell: bash
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          cd "$PROJECT_DIR"
+          gradle :app:lintRelease --stacktrace
+
+      - name: Guardar reporte Lint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Diagnostico-Lint-v7.4.1
+          path: ${{ env.PROJECT_DIR }}/app/build/reports/lint-results-release.*
+          if-no-files-found: warn
+
+      - name: 3 - Compilar APK
+        shell: bash
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          cd "$PROJECT_DIR"
+          gradle :app:assembleRelease --stacktrace
+
+      - name: 4 - Compilar AAB Google Play
+        shell: bash
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          cd "$PROJECT_DIR"
+          gradle :app:bundleRelease --stacktrace
+
+      - name: 5 - Verificar firma y localizar archivos
         shell: bash
         run: |
           APK_FILE="$(find "$PROJECT_DIR/app/build/outputs/apk/release" -type f -name '*.apk' | head -n 1)"
@@ -99,34 +144,23 @@ jobs:
           echo "AAB_FILE=$AAB_FILE" >> "$GITHUB_ENV"
           echo "CHECKSUM_FILE=$RUNNER_TEMP/release-sha256.txt" >> "$GITHUB_ENV"
 
-      - name: Localizar Lint
-        shell: bash
-        run: |
-          LINT_HTML="$(find "$PROJECT_DIR/app/build/reports" -type f -name 'lint-results-release.html' | head -n 1)"
-          LINT_XML="$(find "$PROJECT_DIR/app/build/reports" -type f -name 'lint-results-release.xml' | head -n 1)"
-          echo "LINT_HTML=$LINT_HTML" >> "$GITHUB_ENV"
-          echo "LINT_XML=$LINT_XML" >> "$GITHUB_ENV"
-
-      - name: Subir APK firmado
+      - name: 6 - Subir APK
         uses: actions/upload-artifact@v4
         with:
-          name: ControlStreaming-v7.4-APK
+          name: ControlStreaming-v7.4.1-APK
           path: ${{ env.APK_FILE }}
           if-no-files-found: error
 
-      - name: Subir AAB para Google Play
+      - name: 7 - Subir AAB Google Play
         uses: actions/upload-artifact@v4
         with:
-          name: ControlStreaming-v7.4-GooglePlay-AAB
+          name: ControlStreaming-v7.4.1-GooglePlay-AAB
           path: ${{ env.AAB_FILE }}
           if-no-files-found: error
 
-      - name: Subir controles de calidad
+      - name: Guardar SHA-256
         uses: actions/upload-artifact@v4
         with:
-          name: ControlStreaming-v7.4-Calidad
-          path: |
-            ${{ env.LINT_HTML }}
-            ${{ env.LINT_XML }}
-            ${{ env.CHECKSUM_FILE }}
+          name: ControlStreaming-v7.4.1-SHA256
+          path: ${{ env.CHECKSUM_FILE }}
           if-no-files-found: warn
